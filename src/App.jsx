@@ -565,7 +565,7 @@ export default function NbsIpsQrPaymentApp() {
         setNbsValidation({status: "loading", message: "Проверка через NBS Validator API...", errors: []});
 
         try {
-            const response = await fetch("/api/nbs/validate?lang=en", {
+            const response = await fetch("/api/nbs-validate", {
                 method: "POST",
                 headers: {
                     "Content-Type": "text/plain; charset=UTF-8",
