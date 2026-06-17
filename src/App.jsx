@@ -1,11 +1,11 @@
-import React, {useEffect, useMemo, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {QRCodeSVG} from "qrcode.react";
 import {Card, CardContent} from "./components/ui/card";
 import {Input} from "./components/ui/input";
 import {Label} from "./components/ui/label";
 import {Textarea} from "./components/ui/textarea";
 import {Button} from "./components/ui/button";
-import {AlertCircle, CheckCircle2, Copy, Moon, Printer, RotateCcw, Sun} from "lucide-react";
+import {AlertCircle, CheckCircle2, Copy, Download, Moon, Printer, RotateCcw, Sun} from "lucide-react";
 
 const initialForm = {
     payer: "",
@@ -36,6 +36,8 @@ Beograd`,
 const HISTORY_STORAGE_KEY = "nbs_ips_qr_payment_history_v1";
 const THEME_STORAGE_KEY = "nbs_ips_qr_theme_v1";
 const HISTORY_LIMIT = 20;
+const QR_IMAGE_SIZES = [256, 512, 1024, 2048];
+const QR_MARGIN_SIZE = 4;
 
 function cleanAccount(value) {
     const digits = value.replace(/\D/g, "");
@@ -188,6 +190,83 @@ function formatDateTime(value) {
     } catch {
         return value;
     }
+}
+
+function sanitizeFilename(value) {
+    const normalized = value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9а-яё]+/gi, "-")
+        .replace(/^-+|-+$/g, "");
+
+    return normalized || "nbs-ips-qr";
+}
+
+function makeQrFileName(form, size) {
+    const payeeTitle = form.payee?.split("\n")[0] || "";
+    return `${sanitizeFilename(payeeTitle)}-${size}x${size}.png`;
+}
+
+function downloadBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function svgToPngBlob(svgElement, size) {
+    return new Promise((resolve, reject) => {
+        const svgClone = svgElement.cloneNode(true);
+        svgClone.setAttribute("width", String(size));
+        svgClone.setAttribute("height", String(size));
+        svgClone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+
+        const svgText = new XMLSerializer().serializeToString(svgClone);
+        const svgBlob = new Blob([svgText], {type: "image/svg+xml;charset=utf-8"});
+        const imageUrl = URL.createObjectURL(svgBlob);
+        const image = new Image();
+
+        image.onload = () => {
+            try {
+                const canvas = document.createElement("canvas");
+                canvas.width = size;
+                canvas.height = size;
+
+                const context = canvas.getContext("2d");
+                if (!context) {
+                    reject(new Error("Canvas 2D context is unavailable."));
+                    return;
+                }
+
+                context.fillStyle = "#ffffff";
+                context.fillRect(0, 0, size, size);
+                context.drawImage(image, 0, 0, size, size);
+
+                canvas.toBlob((blob) => {
+                    if (!blob) {
+                        reject(new Error("PNG export failed."));
+                        return;
+                    }
+                    resolve(blob);
+                }, "image/png");
+            } catch (error) {
+                reject(error);
+            } finally {
+                URL.revokeObjectURL(imageUrl);
+            }
+        };
+
+        image.onerror = () => {
+            URL.revokeObjectURL(imageUrl);
+            reject(new Error("Could not load QR SVG for PNG export."));
+        };
+
+        image.src = imageUrl;
+    });
 }
 
 function Field({label, children, required}) {
@@ -485,6 +564,7 @@ function PrintStyles() {
 
 export default function NbsIpsQrPaymentApp() {
     const [form, setForm] = useState(initialForm);
+    const qrPreviewRef = useRef(null);
     const [theme, setTheme] = useState(() => {
         try {
             return localStorage.getItem(THEME_STORAGE_KEY) || "dark";
@@ -494,11 +574,9 @@ export default function NbsIpsQrPaymentApp() {
     });
     const [copied, setCopied] = useState(false);
     const [nbsValidation, setNbsValidation] = useState({status: "idle", message: "", errors: []});
-    const [history, setHistory] = useState([]);
-
-    useEffect(() => {
-        setHistory(readHistory());
-    }, []);
+    const [qrImageSize, setQrImageSize] = useState(1024);
+    const [qrExportError, setQrExportError] = useState("");
+    const [history, setHistory] = useState(() => readHistory());
 
     useEffect(() => {
         localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -511,6 +589,7 @@ export default function NbsIpsQrPaymentApp() {
     function update(name, value) {
         setForm((prev) => ({...prev, [name]: value}));
         setCopied(false);
+        setQrExportError("");
         setNbsValidation({status: "idle", message: "", errors: []});
     }
 
@@ -550,6 +629,24 @@ export default function NbsIpsQrPaymentApp() {
 
     function printPaymentSlip() {
         window.print();
+    }
+
+    async function saveQrImage() {
+        if (!isValid) return;
+
+        const svgElement = qrPreviewRef.current?.querySelector("svg");
+        if (!svgElement) {
+            setQrExportError("QR-код ещё не отрисован. Попробуйте ещё раз.");
+            return;
+        }
+
+        try {
+            setQrExportError("");
+            const blob = await svgToPngBlob(svgElement, qrImageSize);
+            downloadBlob(blob, makeQrFileName(form, qrImageSize));
+        } catch (error) {
+            setQrExportError(`Не удалось сохранить PNG: ${error?.message || error}`);
+        }
     }
 
     async function validateWithNbs() {
@@ -787,7 +884,8 @@ export default function NbsIpsQrPaymentApp() {
                                     {isValid && (
                                         <div className="print-qr-block mt-4 hidden print:block">
                                             <div className="mb-2 text-sm font-bold">NBS IPS QR</div>
-                                            <QRCodeSVG value={normalized.payload} size={170} level="M"/>
+                                            <QRCodeSVG value={normalized.payload} size={170} level="M"
+                                                       marginSize={QR_MARGIN_SIZE}/>
                                         </div>
                                     )}
                                 </div>
@@ -807,9 +905,11 @@ export default function NbsIpsQrPaymentApp() {
                                 </div>
 
                                 <div
+                                    ref={qrPreviewRef}
                                     className="flex justify-center rounded-2xl border border-slate-700 bg-slate-950/70 p-6">
                                     {isValid ? (
-                                        <QRCodeSVG value={normalized.payload} size={230} level="M"/>
+                                        <QRCodeSVG value={normalized.payload} size={230} level="M"
+                                                   marginSize={QR_MARGIN_SIZE}/>
                                     ) : (
                                         <div
                                             className="flex h-[230px] w-[230px] items-center justify-center rounded-xl border border-dashed text-center text-sm text-slate-500">
@@ -817,6 +917,34 @@ export default function NbsIpsQrPaymentApp() {
                                         </div>
                                     )}
                                 </div>
+
+                                <div className="grid gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-3 sm:grid-cols-[1fr_auto]">
+                                    <label className="space-y-1 text-sm">
+                                        <span className="block font-semibold text-slate-200">Размер изображения</span>
+                                        <select
+                                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                                            value={qrImageSize}
+                                            onChange={(event) => setQrImageSize(Number(event.target.value))}
+                                            disabled={!isValid}
+                                        >
+                                            {QR_IMAGE_SIZES.map((size) => (
+                                                <option key={size} value={size}>
+                                                    {size} x {size} px
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+
+                                    <Button type="button" variant="outline" onClick={saveQrImage} disabled={!isValid}>
+                                        <Download className="mr-2 h-4 w-4"/> Сохранить PNG
+                                    </Button>
+                                </div>
+
+                                {qrExportError && (
+                                    <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+                                        {qrExportError}
+                                    </div>
+                                )}
 
                                 <div
                                     className="rounded-xl border border-slate-800 bg-slate-950/50 p-3 text-xs text-slate-400">
