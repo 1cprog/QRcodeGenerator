@@ -14,6 +14,7 @@ const initialForm = {
     amount: "",
     paymentCode: "289",
     paymentPurpose: "",
+    qrPaymentPurpose: "",
     model: "",
     reference: "",
 };
@@ -28,7 +29,8 @@ Beograd`,
     payeeAccount: "840-955845-10",
     amount: "1025,12",
     paymentCode: "289",
-    paymentPurpose: "Uplata po računu",
+    paymentPurpose: "Ukljucivanje u obavezno zdr. osiguranje za maj 2025",
+    qrPaymentPurpose: "Ukljucivanje u obavezno zdr.",
     model: "97",
     reference: "14123412",
 };
@@ -38,6 +40,7 @@ const THEME_STORAGE_KEY = "nbs_ips_qr_theme_v1";
 const HISTORY_LIMIT = 20;
 const QR_IMAGE_SIZES = [256, 512, 1024, 2048];
 const QR_MARGIN_SIZE = 4;
+const PAYMENT_PURPOSE_MAX_LENGTH = 35;
 
 function cleanAccount(value) {
     const digits = value.replace(/\D/g, "");
@@ -87,15 +90,35 @@ function limitLines(value, maxLines) {
     return value.split("\n").slice(0, maxLines).join("\n");
 }
 
+function getQrPaymentPurpose(form) {
+    return (form.qrPaymentPurpose ?? form.paymentPurpose).trim();
+}
+
+function shouldSyncQrPaymentPurpose(form) {
+    const currentQrPurpose = form.qrPaymentPurpose ?? "";
+    return currentQrPurpose === "" || currentQrPurpose === form.paymentPurpose.slice(0, PAYMENT_PURPOSE_MAX_LENGTH);
+}
+
+function hydrateForm(form) {
+    const hydrated = {...initialForm, ...form};
+
+    if (!hydrated.qrPaymentPurpose && hydrated.paymentPurpose) {
+        hydrated.qrPaymentPurpose = hydrated.paymentPurpose.slice(0, PAYMENT_PURPOSE_MAX_LENGTH);
+    }
+
+    return hydrated;
+}
+
 function validate(form, payloadParts) {
     const errors = [];
     const account = cleanAccount(form.payeeAccount);
     const amount = normalizeAmount(form.amount);
     const ro = normalizeReference(form.model, form.reference);
+    const qrPaymentPurpose = getQrPaymentPurpose(form);
 
     if (containsCyrillic(form.payer)) errors.push("Плательщик: кириллица недопустима для NBS QR. Используйте латиницу.");
     if (containsCyrillic(form.payee)) errors.push("Получатель: кириллица недопустима для NBS QR. Используйте латиницу.");
-    if (containsCyrillic(form.paymentPurpose)) errors.push("Назначение платежа: кириллица недопустима для NBS QR. Используйте латиницу.");
+    if (containsCyrillic(qrPaymentPurpose)) errors.push("Назначение для QR: кириллица недопустима для NBS QR. Используйте латиницу.");
     if (containsCyrillic(form.reference)) errors.push("Позив на број: кириллица недопустима для NBS QR.");
     if (!form.payee.trim()) errors.push("Заполните получателя платежа.");
     if (!account) errors.push("Заполните счёт получателя.");
@@ -105,10 +128,11 @@ function validate(form, payloadParts) {
     if (!form.paymentCode.trim()) errors.push("Заполните шифру платежа.");
     if (form.paymentCode && !/^\d{3}$/.test(form.paymentCode)) errors.push("Шифра платежа должна состоять из 3 цифр, например 289.");
     if (!form.paymentPurpose.trim()) errors.push("Заполните назначение платежа.");
+    if (!qrPaymentPurpose) errors.push("Заполните короткое назначение для QR.");
 
     if (form.payee.length > 70) errors.push("Получатель платежа: максимум 70 символов.");
     if (form.payer.length > 70) errors.push("Плательщик: максимум 70 символов.");
-    if (form.paymentPurpose.length > 35) errors.push("Назначение платежа: максимум 35 символов.");
+    if (qrPaymentPurpose.length > PAYMENT_PURPOSE_MAX_LENGTH) errors.push(`Назначение для QR: максимум ${PAYMENT_PURPOSE_MAX_LENGTH} символов по NBS IPS QR.`);
     if (form.payee.split("\n").length > 3) errors.push("Получатель платежа: максимум 3 строки.");
     if (form.payer.split("\n").length > 3) errors.push("Плательщик: максимум 3 строки.");
     if (ro.length > 25) errors.push("Модель + позив на број: максимум 25 символов в QR payload.");
@@ -126,6 +150,7 @@ function buildPayload(form) {
     const account = cleanAccount(form.payeeAccount);
     const amount = normalizeAmount(form.amount);
     const ro = normalizeReference(form.model, form.reference);
+    const qrPaymentPurpose = getQrPaymentPurpose(form);
 
     const parts = [
         ["K", "PR"],
@@ -136,7 +161,7 @@ function buildPayload(form) {
         ["I", amount],
         ["P", limitLines(form.payer.trim(), 3)],
         ["SF", form.paymentCode.trim()],
-        ["S", form.paymentPurpose.trim()],
+        ["S", qrPaymentPurpose],
         ["RO", ro],
     ]
         .filter(([, value]) => value !== "")
@@ -290,7 +315,7 @@ function PaymentSlip({form, normalized, printable = false}) {
             <div className="slip-grid">
                 <div className="slip-left">
                     <SlipLine label="uplatilac" value={form.payer || ""} multiline/>
-                    <SlipLine label="svrha uplate" value={form.paymentPurpose || ""}/>
+                    <SlipLine label="svrha uplate" value={form.paymentPurpose || ""} multiline/>
                     <SlipLine label="primalac" value={form.payee || ""} multiline/>
                 </div>
 
@@ -593,6 +618,19 @@ export default function NbsIpsQrPaymentApp() {
         setNbsValidation({status: "idle", message: "", errors: []});
     }
 
+    function updatePaymentPurpose(value) {
+        setForm((prev) => ({
+            ...prev,
+            paymentPurpose: value,
+            qrPaymentPurpose: shouldSyncQrPaymentPurpose(prev)
+                ? value.slice(0, PAYMENT_PURPOSE_MAX_LENGTH)
+                : prev.qrPaymentPurpose,
+        }));
+        setCopied(false);
+        setQrExportError("");
+        setNbsValidation({status: "idle", message: "", errors: []});
+    }
+
     function saveToHistory() {
         if (!isValid) return;
         const item = makeHistoryItem(form, normalized);
@@ -602,7 +640,7 @@ export default function NbsIpsQrPaymentApp() {
     }
 
     function loadFromHistory(item) {
-        setForm({...initialForm, ...item.form});
+        setForm(hydrateForm(item.form));
         setCopied(false);
         setNbsValidation({status: "idle", message: "", errors: []});
     }
@@ -738,7 +776,7 @@ export default function NbsIpsQrPaymentApp() {
                         }>
                         <CardContent className="space-y-5 p-6">
                             <div className="flex flex-wrap gap-2">
-                                <Button type="button" variant="outline" onClick={() => setForm(examples)}>
+                                <Button type="button" variant="outline" onClick={() => setForm(hydrateForm(examples))}>
                                     Заполнить примером
                                 </Button>
                                 <Button type="button" variant="ghost" onClick={() => setForm(initialForm)}>
@@ -797,12 +835,28 @@ export default function NbsIpsQrPaymentApp() {
                                     />
                                 </Field>
 
-                                <Field label="Назначение платежа" required>
-                                    <Input
+                                <Field label="Назначение платежа на платёжке" required>
+                                    <Textarea
                                         value={form.paymentPurpose}
-                                        onChange={(e) => update("paymentPurpose", e.target.value.slice(0, 35))}
-                                        placeholder="Uplata po računu"
+                                        onChange={(e) => updatePaymentPurpose(e.target.value)}
+                                        placeholder="Ukljucivanje u obavezno zdr. osiguranje za maj 2025"
+                                        rows={2}
                                     />
+                                </Field>
+
+                                <Field label="Назначение для QR / tag S" required>
+                                    <div className="space-y-1.5">
+                                        <Input
+                                            value={form.qrPaymentPurpose}
+                                            onChange={(e) => update("qrPaymentPurpose", e.target.value.slice(0, PAYMENT_PURPOSE_MAX_LENGTH))}
+                                            placeholder="Ukljucivanje u obavezno zdr."
+                                            maxLength={PAYMENT_PURPOSE_MAX_LENGTH}
+                                        />
+                                        <div className={isDark ? "text-xs text-slate-400" : "text-xs text-slate-600"}>
+                                            NBS IPS QR ограничивает tag S до {PAYMENT_PURPOSE_MAX_LENGTH} символов.
+                                            Полный текст выше останется на платёжке. Сейчас {getQrPaymentPurpose(form).length}/{PAYMENT_PURPOSE_MAX_LENGTH}.
+                                        </div>
+                                    </div>
                                 </Field>
 
                                 <Field label="Модель">
